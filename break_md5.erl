@@ -2,6 +2,7 @@
 -define(PASS_LEN, 6).
 -define(UPDATE_BAR_GAP, 1000).
 -define(BAR_SIZE, 40).
+-define(MAX_PROCS, 2).
 
 -export([break_md5s/1, break_md5/1, pass_to_num/1, num_to_pass/1]).
 -export([progress_loop/2]).
@@ -73,10 +74,15 @@ break_md5(Hashes, N, Bound, Progress_Pid) ->
     case lists:member(Num_Hash, Hashes) of
         true ->
             io:format("\e[2K\r~.16B: ~s~n", [Num_Hash, Pass]),
-            break_md5(lists:delete(Num_Hash, Hashes), N+1, Bound, Progress_Pid);
+            break_md5(lists:delete(Num_Hash, Hashes), N+?MAX_PROCS, Bound, Progress_Pid);
         false ->
-            break_md5(Hashes, N+1, Bound, Progress_Pid)
+            break_md5(Hashes, N+?MAX_PROCS, Bound, Progress_Pid)
     end.
+
+create_procs(_, -1, _, _) -> true;
+create_procs(Hashes, Procs, Bound, Progress_Pid) ->
+    spawn(?MODULE, break_md5, [Hashes, Procs, Bound, Progress_Pid]),
+    create_procs(Hashes, Procs-1, Bound, Progress_Pid).
 
 %% Break a list of hashes
 
@@ -84,7 +90,7 @@ break_md5s(Hashes) ->
     Bound = pow(26, ?PASS_LEN),
     Progress_Pid = spawn(?MODULE, progress_loop, [0, Bound]),
     Num_Hashes = lists:map(fun hex_string_to_num/1, Hashes),
-    Res = break_md5(Num_Hashes, 0, Bound, Progress_Pid),
+    Res = break_md5(Num_Hashes, ?MAX_PROCS-1, Bound, Progress_Pid),
     Progress_Pid ! stop,
     Res.
 
