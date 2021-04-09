@@ -6,6 +6,7 @@
 
 -export([break_md5s/1, break_md5/1, pass_to_num/1, num_to_pass/1]).
 -export([progress_loop/2]).
+-export([break_md5/5]).
 
 % Base ^ Exp
 
@@ -48,7 +49,12 @@ hex_string_to_num(Hex) -> hex_string_to_num_aux(Hex, 0).
 
 progress_loop(N, Bound) ->
     receive
-        stop -> ok;
+        {stop, Pid} ->
+            io:fwrite("\n"),
+            Pid ! stop;
+        {stop_hashes, Hashes, Pid} ->
+            Pid ! {stop_hashes, Hashes},
+            ok;
         {progress_report, Checked} ->
             N2 = N + Checked,
             Full_N = N2 * ?BAR_SIZE div Bound,
@@ -60,38 +66,72 @@ progress_loop(N, Bound) ->
 
 %% break_md5/2 iterates checking the possible passwords
 
-break_md5([], _, _, _) -> ok; % No more hashes to find
-break_md5(Hashes,  N, N, _) -> {not_found, Hashes};  % Checked every possible password
-break_md5(Hashes, N, Bound, Progress_Pid) ->
-    if N rem ?UPDATE_BAR_GAP == 0 ->
-            Progress_Pid ! {progress_report, ?UPDATE_BAR_GAP};
-       true ->
-            ok
-    end,
-    Pass = num_to_pass(N),
-    Hash = crypto:hash(md5, Pass),
-    Num_Hash = binary:decode_unsigned(Hash),
-    case lists:member(Num_Hash, Hashes) of
-        true ->
-            io:format("\e[2K\r~.16B: ~s~n", [Num_Hash, Pass]),
-            break_md5(lists:delete(Num_Hash, Hashes), N+?MAX_PROCS, Bound, Progress_Pid);
-        false ->
-            break_md5(Hashes, N+?MAX_PROCS, Bound, Progress_Pid)
+break_md5([], _, _, _, Pid) ->
+    Pid ! finished,
+    ok; % No more hashes to find
+break_md5(Hashes,  N, N, _, Pid) ->
+    Pid ! {not_found, Hashes},
+    ok;  % Checked every possible password
+break_md5(Hashes, N, Bound, Progress_Pid, Pid) ->
+    receive
+        {del, New_Hashes} ->
+            break_md5(New_Hashes, N, Bound, Progress_Pid, Pid);
+        stop -> ok
+    after 0 ->
+        if N rem ?UPDATE_BAR_GAP == 0 ->
+                Progress_Pid ! {progress_report, ?UPDATE_BAR_GAP};
+           true ->
+                ok
+        end,
+        Pass = num_to_pass(N),
+        Hash = crypto:hash(md5, Pass),
+        Num_Hash = binary:decode_unsigned(Hash),
+        case lists:member(Num_Hash, Hashes) of
+            true ->
+                io:format("\e[2K\r~.16B: ~s~n", [Num_Hash, Pass]),
+                Pid ! {find, lists:delete(Num_Hash, Hashes)},
+                break_md5(lists:delete(Num_Hash, Hashes), N+?MAX_PROCS, Bound, Progress_Pid, Pid);
+            false ->
+                break_md5(Hashes, N+?MAX_PROCS, Bound, Progress_Pid, Pid)
+        end
     end.
 
-create_procs(_, -1, _, _) -> true;
-create_procs(Hashes, Procs, Bound, Progress_Pid) ->
-    spawn(?MODULE, break_md5, [Hashes, Procs, Bound, Progress_Pid]),
-    create_procs(Hashes, Procs-1, Bound, Progress_Pid).
+create_procs(Hashes, 0, Bound, Progress_Pid, Num_Procs, List_Pid) ->
+    receive
+        {stop_hashes, Hashes} -> {not_found, Hashes};
+        stop -> ok;
+        {find, Hashes} ->
+            Fun = fun(Pid_Aux) -> Pid_Aux ! {del, Hashes} end,
+            lists:foreach(Fun, List_Pid),
+            create_procs(Hashes, 0, Bound, Progress_Pid, Num_Procs, List_Pid);
+        finished ->
+            if Num_Procs == ?MAX_PROCS ->
+                Progress_Pid ! {stop, self()},
+                create_procs(Hashes, 0, Bound, Progress_Pid, Num_Procs, List_Pid);
+            true ->
+                create_procs(Hashes, 0, Bound, Progress_Pid, Num_Procs+1, List_Pid)
+            end;
+        {not_found, Hashes} ->
+            if Num_Procs == ?MAX_PROCS ->
+                Progress_Pid ! {stop_hashes, Hashes, self()},
+                create_procs(Hashes, 0, Bound, Progress_Pid, Num_Procs, List_Pid);
+            true ->
+                create_procs(Hashes, 0, Bound, Progress_Pid, Num_Procs+1, List_Pid)
+            end
+    end;
+create_procs(Hashes, Procs, Bound, Progress_Pid, Num_Procs, List_Pid) ->
+    Pid = spawn(?MODULE, break_md5, [Hashes, Procs, Bound, Progress_Pid, self()]),
+        create_procs(Hashes, Procs-1, Bound, Progress_Pid, Num_Procs, [Pid | List_Pid]).
 
 %% Break a list of hashes
 
 break_md5s(Hashes) ->
+    List_Pid = [],
     Bound = pow(26, ?PASS_LEN),
     Progress_Pid = spawn(?MODULE, progress_loop, [0, Bound]),
     Num_Hashes = lists:map(fun hex_string_to_num/1, Hashes),
-    Res = break_md5(Num_Hashes, ?MAX_PROCS-1, Bound, Progress_Pid),
-    Progress_Pid ! stop,
+    Res = create_procs(Num_Hashes, ?MAX_PROCS, Bound, Progress_Pid, 1, List_Pid),
+    %%Progress_Pid ! stop,
     Res.
 
 %% Break a single hash
