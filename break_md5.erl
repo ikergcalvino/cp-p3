@@ -2,11 +2,12 @@
 -define(PASS_LEN, 6).
 -define(UPDATE_BAR_GAP, 1000).
 -define(BAR_SIZE, 40).
--define(MAX_PROCS, 2).
+-define(MAX_PROCS, 8).
 
 -export([break_md5s/1, break_md5/1, pass_to_num/1, num_to_pass/1]).
 -export([progress_loop/2]).
 -export([break_md5/5]).
+-export([create_procs/7]).
 
 % Base ^ Exp
 
@@ -69,7 +70,7 @@ progress_loop(N, Bound) ->
 break_md5([], _, _, _, Pid) ->
     Pid ! finished,
     ok; % No more hashes to find
-break_md5(Hashes,  N, N, _, Pid) ->
+break_md5(Hashes, N, N, _, Pid) ->
     Pid ! {not_found, Hashes},
     ok;  % Checked every possible password
 break_md5(Hashes, N, Bound, Progress_Pid, Pid) ->
@@ -90,38 +91,40 @@ break_md5(Hashes, N, Bound, Progress_Pid, Pid) ->
             true ->
                 io:format("\e[2K\r~.16B: ~s~n", [Num_Hash, Pass]),
                 Pid ! {find, lists:delete(Num_Hash, Hashes)},
-                break_md5(lists:delete(Num_Hash, Hashes), N+?MAX_PROCS, Bound, Progress_Pid, Pid);
+                break_md5(lists:delete(Num_Hash, Hashes), N+1, Bound, Progress_Pid, Pid);
             false ->
-                break_md5(Hashes, N+?MAX_PROCS, Bound, Progress_Pid, Pid)
+                break_md5(Hashes, N+1, Bound, Progress_Pid, Pid)
         end
     end.
 
-create_procs(Hashes, 0, Bound, Progress_Pid, Num_Procs, List_Pid) ->
+create_procs(0, Num_Hashes, X, Bound, Progress_Pid, N, List_Pid) ->
     receive
         {stop_hashes, Hashes} -> {not_found, Hashes};
         stop -> ok;
         {find, Hashes} ->
             Fun = fun(Pid_Aux) -> Pid_Aux ! {del, Hashes} end,
             lists:foreach(Fun, List_Pid),
-            create_procs(Hashes, 0, Bound, Progress_Pid, Num_Procs, List_Pid);
+            create_procs(0, Num_Hashes, X, Bound, Progress_Pid, N, List_Pid);
         finished ->
-            if Num_Procs == ?MAX_PROCS ->
-                Progress_Pid ! {stop, self()},
-                create_procs(Hashes, 0, Bound, Progress_Pid, Num_Procs, List_Pid);
+            if N == ?MAX_PROCS ->
+                Progress_Pid ! {stop, self()}, 
+                create_procs(0, Num_Hashes, X, Bound, Progress_Pid, N, List_Pid);
             true ->
-                create_procs(Hashes, 0, Bound, Progress_Pid, Num_Procs+1, List_Pid)
+                create_procs(0, Num_Hashes, 1, Bound, Progress_Pid, N+1, List_Pid)
             end;
         {not_found, Hashes} ->
-            if Num_Procs == ?MAX_PROCS ->
+            if N == ?MAX_PROCS ->
                 Progress_Pid ! {stop_hashes, Hashes, self()},
-                create_procs(Hashes, 0, Bound, Progress_Pid, Num_Procs, List_Pid);
+                create_procs(0, Num_Hashes, X, Bound, Progress_Pid, N, List_Pid);
             true ->
-                create_procs(Hashes, 0, Bound, Progress_Pid, Num_Procs+1, List_Pid)
+                create_procs(0, Num_Hashes, 1, Bound, Progress_Pid, N+1, List_Pid)
             end
     end;
-create_procs(Hashes, Procs, Bound, Progress_Pid, Num_Procs, List_Pid) ->
-    Pid = spawn(?MODULE, break_md5, [Hashes, Procs, Bound, Progress_Pid, self()]),
-        create_procs(Hashes, Procs-1, Bound, Progress_Pid, Num_Procs, [Pid | List_Pid]).
+create_procs(N, Num_Hashes, X, Bound, Progress_Pid, Y, List_Pid) ->
+    Ini = Bound div ?MAX_PROCS * (N-1),
+    Fin = Bound div ?MAX_PROCS * N,
+    Pid = spawn(?MODULE, break_md5,[Num_Hashes, Ini, Fin, Progress_Pid, self()]),
+	create_procs(N-1, Num_Hashes, X, Bound, Progress_Pid, Y, [Pid | List_Pid]).
 
 %% Break a list of hashes
 
@@ -130,7 +133,7 @@ break_md5s(Hashes) ->
     Bound = pow(26, ?PASS_LEN),
     Progress_Pid = spawn(?MODULE, progress_loop, [0, Bound]),
     Num_Hashes = lists:map(fun hex_string_to_num/1, Hashes),
-    Res = create_procs(Num_Hashes, ?MAX_PROCS, Bound, Progress_Pid, 1, List_Pid),
+    Res = create_procs(?MAX_PROCS, Num_Hashes, 0, Bound, Progress_Pid, 1, List_Pid),
     %%Progress_Pid ! stop,
     Res.
 
